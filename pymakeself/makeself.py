@@ -57,8 +57,6 @@ This install script can be run on another machine to extract the archive and
 run the setup_script script inside it.
 
 """
-from __future__ import print_function
-from __future__ import absolute_import
 import os
 import sys
 import shutil
@@ -66,16 +64,11 @@ import tarfile
 import tempfile
 import stat
 import base64
-try:
-    import lzma
-except ImportError:
-    pass
 
-__version__ = '0.3.6'
+__version__ = '0.4.0'
 
 _exe_template = \
 b"""
-from __future__ import print_function
 import base64
 import tarfile
 import shutil
@@ -154,6 +147,25 @@ def main():
             os.unlink(tar_path)
             tar_path = new_tar_path
 
+        if digital_signature_added:
+            # Write the rsa tarfile to disk.
+            rsa_path = os.path.join(tmp_dir, 'rsa.tar.gz')
+            with open(rsa_path, 'wb') as fp:
+                fp.write(base64.decodebytes(RSA_PKG_DATA))
+
+            # Unpack the rsa tarfile then delete it.
+            with tarfile.open(rsa_path) as t:
+                t.extractall(tmp_dir) #, filter='tar')
+            os.unlink(rsa_path)
+
+            # import rsa module and verify signature
+            sys.path.insert(0, tmp_dir)
+            from rsa import rsakeysign
+            rsakeysign.VerifySignature(base64.decodebytes(SIGNATURE_DATA), base64.decodebytes(PKG_DATA), pub_key_file)
+            print('===> Signature is verified')
+        else:
+            print('===> Installer was not signed')
+
         # List tarfile contents.
         if args.list:
             with tarfile.open(tar_path) as t:
@@ -230,7 +242,7 @@ def main():
                 # it was not located in archive dir.
                 os.chdir(arch_path)
 
-            exec(code, {'__name__': '__main__', '__file__': script_name})
+            exec(code, {'__name__': '__main__', '__file__': script_name, '__orig_dir__' : orig_dir})
             # *** DO NO EXPECT EXECUTION PAST THIS POINT ***
             # setup script may call sys.exit()
     except RuntimeError as e:
@@ -249,7 +261,8 @@ def main():
 
 def make_package(content_dir, file_name, setup_script, script_args=(),
                  sha256=True, compress='gz', follow=False, tools=False,
-                 quiet=False, label=None, password=None):
+                 quiet=False, label=None, password=None, priv_key_file=None,
+                 pub_key_file=None):
     """Create a self-extracting archive.
 
     Arguments:
@@ -264,6 +277,8 @@ def make_package(content_dir, file_name, setup_script, script_args=(),
     quiet        -- Do not print any messages other than errors if True
     label        -- Text string describing the package
     password     -- Password protect contents if not None
+    priv_key_file -- Local path to private key file 
+    pub_key_file  -- Installer path to public key file.
 
     Return:
     Path to self-extracting installer executable.
@@ -300,20 +315,32 @@ def make_package(content_dir, file_name, setup_script, script_args=(),
     # Create a temporary directory to do work in.
     tmp_dir = tempfile.mkdtemp('_pymakeself')
     pkg_path = os.path.join(tmp_dir, os.path.basename(file_name))
+    if label:
+        label = label.replace("'", "\\'")
+
+    add_digital_signature = False
+    if priv_key_file:
+        if not os.path.isfile(priv_key_file):
+            raise RuntimeError('priv_key_file not found ' + priv_key_file)
+        if not pub_key_file:
+            raise RuntimeError('pub_key_file option required with priv_key_file option')
+        add_digital_signature = True
+
     try:
         _copy_package_files(pkg_path, content_dir, setup_script, in_content,
-                            tools, password)
-        tar_path, sha256_sum, aes_tar_path = _archive_package(
-            pkg_path, compress, sha256, password)
+                            tools, password, add_digital_signature)
+        tar_path, sha256_sum, aes_tar_path, rsa_tar_path = _archive_package(
+            pkg_path, compress, sha256, password, add_digital_signature)
         return _pkg_to_exe(tar_path, file_name, setup_script, script_args,
-                           in_content, sha256_sum, label, aes_tar_path)
+                           in_content, sha256_sum, label, aes_tar_path,
+                           rsa_tar_path, priv_key_file, pub_key_file)
     finally:
         # Always clean up temporary work directory.
         shutil.rmtree(tmp_dir, True)
 
 
 def _copy_package_files(pkg_path, install_src, setup_script, in_content,
-                        tools, password):
+                        tools, password, add_digital_signature):
     os.mkdir(pkg_path)
     install_dst = os.path.join(pkg_path, 'install_files')
 
@@ -357,8 +384,14 @@ def _copy_package_files(pkg_path, install_src, setup_script, in_content,
         shutil.copytree(os.path.join(parent_path, dir_name),
                         os.path.join(dst_dir, dir_name))
 
+    if add_digital_signature:
+        dir_name = 'rsa'
+        dst_dir = os.path.dirname(pkg_path)
+        parent_path = os.path.dirname(os.path.abspath(__file__))
+        shutil.copytree(os.path.join(parent_path, dir_name),
+                        os.path.join(dst_dir, dir_name))
 
-def _archive_package(pkg_path, compress, sha256, password):
+def _archive_package(pkg_path, compress, sha256, password, add_digital_signature):
     tar_path = pkg_path + '.tar.' + compress
 
     def reset(tarinfo):
@@ -396,6 +429,16 @@ def _archive_package(pkg_path, compress, sha256, password):
         os.unlink(tar_path)
         tar_path = aes_path
 
+    rsa_tar_path = None
+    if add_digital_signature:
+        # Package the rsa module into its own tarfile.
+        rsa_pkg_path = os.path.join(pkg_parent, 'rsa')
+        rsa_tar_path = rsa_pkg_path + '.tar.gz'
+        print('===> packaging rsa module:', os.path.basename(rsa_tar_path))
+        with tarfile.open(rsa_tar_path, 'w:gz') as tar:
+            # Package path must only contain the directory to tar.
+            tar.add(os.path.basename(rsa_pkg_path), filter=reset)
+
     os.chdir(orig_dir)
 
     sha256_sum = None
@@ -415,11 +458,11 @@ def _archive_package(pkg_path, compress, sha256, password):
     else:
         print('===> skipping SHA256')
 
-    return tar_path, sha256_sum, aes_tar_path
+    return tar_path, sha256_sum, aes_tar_path, rsa_tar_path
 
 
 def _pkg_to_exe(tar_path, file_name, setup_script, script_args, in_content,
-                sha256_sum, label, aes_tar_path):
+                sha256_sum, label, aes_tar_path, rsa_tar_path, priv_key_file, pub_key_file):
     tar_name = os.path.basename(tar_path)
     exe_path = os.path.abspath(file_name) + '.py'
     if os.path.exists(exe_path):
@@ -430,7 +473,7 @@ def _pkg_to_exe(tar_path, file_name, setup_script, script_args, in_content,
     print('===> writing executable:', os.path.relpath(exe_path))
     with open(exe_path, 'wb') as exe_f:
         # Write interpreter invocation line.
-        exe_f.write(b'#!/usr/bin/env python\n')
+        exe_f.write(b'#!/usr/bin/env python3\n')
         # Write comment into executable script.
         exe_f.write(b'#\n# Extracts archive and runs setup script.\n#\n')
 
@@ -471,6 +514,31 @@ def _pkg_to_exe(tar_path, file_name, setup_script, script_args, in_content,
             with open(aes_tar_path, 'rb') as aes_pkg_f:
                 base64.encode(aes_pkg_f, exe_f)
             exe_f.write(b'"""\n')
+
+        # Add base64-encoded signature and rsa tar to executable script.
+        if rsa_tar_path and priv_key_file and pub_key_file:
+            from pymakeself.rsa import rsakeysign
+
+            # Use the already-encoded contents of the installer tar file
+            # as the message to be signed.
+            with open(tar_path, 'rb') as pkg_f:
+                tar_bytes = pkg_f.read()
+            signature = rsakeysign.GetSignature(priv_key_file, tar_bytes)
+
+            exe_f.write(b'\nSIGNATURE_DATA = b"""\n')
+            exe_f.write(base64.encodebytes(signature))
+            exe_f.write(b'"""\n')
+            exe_f.write(b"digital_signature_added = True\n")
+            exe_f.write(("pub_key_file = '%s'\n" % (pub_key_file,)).encode())
+
+            # Add encoded rsa module tar to executable script so installer can
+            # access it to verify the signature.
+            exe_f.write(b'\nRSA_PKG_DATA = b"""\n')
+            with open(rsa_tar_path, 'rb') as rsa_pkg_f:
+                base64.encode(rsa_pkg_f, exe_f)
+            exe_f.write(b'"""\n')            
+        else:
+            exe_f.write(b"digital_signature_added = False\n")
 
         # Write base64-encoded tar file into executable script.
         exe_f.write(b'\nPKG_DATA = b"""\n')
@@ -526,6 +594,12 @@ def main(prg=None):
         'password as part of a command line in an automated script is an even '
         'greater risk.  Whenever possible, use the non-echoing, interactive '
         'prompt to enter passwords.  Specifying a password implies --encrypt.')
+    ap.add_argument(
+        '--priv_key_file',
+        help="Local path to private key file.")
+    ap.add_argument(
+        '--pub_key_file',
+        help="Installer path to public key file.")
     ap.add_argument('--quiet', '-q', action='store_true',
                     help='Do not print any messages other than errors.')
     ap.add_argument(
@@ -536,11 +610,9 @@ def main(prg=None):
     ap.add_argument('--tools', '-t', action='store_true',
                     help='Include installtools module.')
     ap.add_argument('--version', action='version', version=__version__)
-    if 'lzma' in dir():
-        ap.add_argument(
-            '--xz', action='store_const', const='xz', dest='compress',
-            help='Compress using xz instead of gzip. This requires Python3.x '
-            'for both creation and extraction.')
+    ap.add_argument(
+        '--xz', action='store_const', const='xz', dest='compress',
+        help='Compress using xz instead of gzip.')
     ap.add_argument('content', help='Directory containing files to '
                     'archive in installer.')
     ap.add_argument('installer_name',
@@ -571,6 +643,7 @@ def main(prg=None):
 
     passwd = None
     pw_str = None
+    priv_key_str = None
     if args.password:
         args.encrypt = True
         passwd = args.password
@@ -580,10 +653,15 @@ def main(prg=None):
         if passwd is None:
             passwd = ""
 
+    if args.priv_key_file:
+        priv_key_str = '<specified, not shown>'
+
     print('compress:', args.compress)
     print('sha256:', args.sha256)
     print('encrypt:', args.encrypt)
     print('password:', pw_str)
+    print('priv_key_file:', priv_key_str)
+    print('pub_key_file:', args.pub_key_file)
     print('quiet:', args.quiet)
     print('tools:', args.tools)
     print('follow:', args.follow)
@@ -606,7 +684,8 @@ def main(prg=None):
         exe_path = make_package(
             args.content, args.installer_name, args.setup_script,
             args.setup_args, args.sha256, args.compress, args.follow,
-            args.tools, args.quiet, args.label, passwd)
+            args.tools, args.quiet, args.label, passwd, args.priv_key_file,
+            args.pub_key_file)
     except Exception as ex:
         print(ex, file=sys.stderr)
         return 1
