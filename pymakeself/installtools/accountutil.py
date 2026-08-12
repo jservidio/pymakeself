@@ -25,7 +25,7 @@ import stat
 import platform
 import subprocess
 from pwd import getpwnam
-from distutils.dir_util import copy_tree
+import shutil
 
 
 class AccountUtil(object):
@@ -104,7 +104,7 @@ class AccountUtil(object):
             if passwd:
                 # Set account password
                 p = subprocess.Popen(('chpasswd',), stdin=subprocess.PIPE)
-                p.stdin.write('%s:%s\n' % (login, passwd))
+                p.stdin.write(('%s:%s\n' % (login, passwd)).encode('utf-8'))
                 p.stdin.close()
                 p.wait()
         elif platform.system().startswith('FreeBSD'):
@@ -126,7 +126,7 @@ class AccountUtil(object):
             if passwd:
                 cmd.extend(('-w', 'yes', '-h', '0'))
                 p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-                p.stdin.write(passwd + '\n')
+                p.stdin.write((passwd + '\n').encode('utf-8'))
                 p.stdin.close()
                 p.wait()
             else:
@@ -210,7 +210,7 @@ class AccountUtil(object):
         """
         uid, gid, home_dir = self.get_user_info()
         print('===> installing files into', home_dir)
-        copy_tree(src_dir, home_dir)
+        shutil.copytree(src_dir, home_dir, dirs_exist_ok=True)
 
         self.set_file_ownership(home_dir, uid, gid)
 

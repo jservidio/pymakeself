@@ -65,7 +65,7 @@ import tempfile
 import stat
 import base64
 
-__version__ = '0.4.0'
+__version__ = '0.4.1'
 
 _exe_template = \
 b"""
@@ -131,7 +131,7 @@ def main():
                 fp.write(base64.decodebytes(AES_PKG_DATA))
             # Unpack the aes tarfile then delete it.
             with tarfile.open(aes_path) as t:
-                t.extractall(tmp_dir)
+                t.extractall(tmp_dir, **({'filter': 'fully_trusted'} if sys.version_info >= (3, 12) else {}))
             os.unlink(aes_path)
 
             # import aes module and decrypt pkg tar file
@@ -157,7 +157,7 @@ def main():
 
             # Unpack the rsa tarfile then delete it.
             with tarfile.open(rsa_path) as t:
-                t.extractall(tmp_dir)
+                t.extractall(tmp_dir, **({'filter': 'fully_trusted'} if sys.version_info >= (3, 12) else {}))
             os.unlink(rsa_path)
 
             # import rsa module and verify signature
@@ -214,7 +214,7 @@ def main():
 
         # Unpack the tarfile.
         with tarfile.open(tar_path) as t:
-            t.extractall(tmp_dir)
+            t.extractall(tmp_dir, **({'filter': 'fully_trusted'} if sys.version_info >= (3, 12) else {}))
         os.unlink(tar_path)
 
         pkg_path = os.path.join(tmp_dir, pkg_name)
